@@ -73,9 +73,9 @@ static void show_prompt(smd_context *ctx) {
     char buf[1024];
 
     snprintf(prompt, 128, "%s:%d", ctx->tcp.host_ip, ctx->tcp.port);
-    printf("\n%s> ", prompt);
 
     while (1) {
+        printf("\n%s> ", prompt);
         fgets(buf, 1024, stdin);
 
         if (buf == NULL) {
@@ -88,8 +88,13 @@ static void show_prompt(smd_context *ctx) {
         }
         
         printf("input : %s", buf);
-        
-        printf("%s> ", prompt);
+    
+        printf("%s():%d  \n", __FUNCTION__, __LINE__);
+        write(ctx->fd, buf, strlen(buf));
+        printf("%s():%d  \n", __FUNCTION__, __LINE__);
+
+        //read(ctx->fd, buf, 1024);
+        //printf("read : %s\n", buf);
     }
 
 quit:
