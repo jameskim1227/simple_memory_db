@@ -20,6 +20,9 @@
 #define CMD_QUIT    2
 #define CMD_UNKNOWN 3
 
+#define SMD_ADD_EVENT   0
+#define SMD_MOD_EVENT   1
+#define SMD_DEL_EVENT   2
 
 /* structures */
 struct smd_event_loop;
@@ -64,6 +67,7 @@ struct smd_server {
 
 
 /* function definition */
+void set_event(int fd, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler); 
 int process_command(int fd, char *buf);
 
 /* gobal varialbes */
@@ -108,7 +112,7 @@ error:
     return NULL;
 }
 
-static void init_server_config() {
+void init_server_config() {
     server.port         = 12345;
     server.tcp_backlog  = 512;
     
@@ -170,8 +174,7 @@ void send_result_to_client(int fd, void *data) {
 int process_command(int fd, char *buf) {
     int cmd;
     void *data;
-    char *command;
-    char *token, *key, *value;
+    char *command, *key, *value;
     char *ptr;
 
     if (buf == NULL) return -1;
@@ -190,9 +193,7 @@ int process_command(int fd, char *buf) {
         case CMD_SET:
             value = strtok_r(NULL, " \n", &ptr);
             smd_set_value(key, value);
-
             e->client_data = apr_psprintf(server.memory_pool, "%s", "set command OK");
-
             break;
         case CMD_GET:
             data = smd_get_value(key);
@@ -200,25 +201,7 @@ int process_command(int fd, char *buf) {
             break;
         case CMD_QUIT:
             send_result_to_client(fd, "closing connection...");
-
-            smd_epoll_state *state = server.event_loop->epoll_state;
-            struct epoll_event ee = {0};
-
-            ee.events = 0;
-            ee.events |= EPOLLIN | EPOLLET;
-
-            ee.data.fd = fd;
-            if (epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, fd, &ee) == -1) {
-                printf("Error: %s\n", strerror(errno));
-                exit(1);
-            }
-
-            e->read_event_handler = NULL; 
-            e->write_event_handler = NULL;
-            e->client_data = NULL;
-
-            printf("Quit Success !!!\n");
-
+            set_event(fd, SMD_DEL_EVENT, NULL, NULL);
             break;
         case CMD_UNKNOWN:
             e->client_data = apr_psprintf(server.memory_pool, "%s", "unknown command");
@@ -232,57 +215,33 @@ int process_command(int fd, char *buf) {
 
 
 void accept_handler(int fd, void *data) {
-    int addr_len;
+    socklen_t addr_len;
     int client_fd;
     struct sockaddr_in client_addr;
 
     addr_len = sizeof(client_addr);
 
     client_fd = accept(server.fd, (struct sockaddr*)&client_addr, &addr_len);
-
     if (client_fd == -1) {
-        printf("Error: %s\n", strerror(errno));
-        exit(1);
+        goto error;
     }
 
     /* add event  */
-    smd_epoll_state *state = server.event_loop->epoll_state;
-    struct epoll_event ee = {0};
+    set_event(client_fd, SMD_ADD_EVENT, read_query_from_client, send_result_to_client);
 
-    ee.events = 0;
-    ee.events |= EPOLLIN | EPOLLET;
-
-    ee.data.fd = client_fd;
-    if (epoll_ctl(state->epoll_fd, EPOLL_CTL_ADD, client_fd, &ee) == -1) {
-        printf("Error: %s\n", strerror(errno));
-        exit(1);
-    }
-    
-    smd_event *e = &server.event_loop->events[client_fd];
-
-    e->read_event_handler = read_query_from_client;
-    e->write_event_handler = send_result_to_client;
-    e->client_data = NULL;
+    return;
+error:
+    printf("Error: %s\n", strerror(errno));
+    apr_pool_destroy(server.memory_pool);
+    apr_terminate();
+    exit(1);
 }
 
-static void init_server() {
+void init_server_socket() {
     struct sockaddr_in server_addr;
-
-    apr_initialize();
-    apr_pool_create(&server.memory_pool, NULL);
-
-    server.hash_table = apr_hash_make(server.memory_pool);
-
-    server.event_loop = smd_create_event_loop(1024);
-    if (server.event_loop == NULL) {
-        printf("Error: %s\n", strerror(errno));
-        goto error;
-    }
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
 
     /* TCP listen  */
     if ((server.fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        printf("Error: %s\n", strerror(errno));
         goto error;
     }
 
@@ -293,37 +252,76 @@ static void init_server() {
 
 
     if (bind(server.fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        printf("Error: %s\n", strerror(errno));
         goto error;
     }
 
     if (listen(server.fd, server.tcp_backlog) == -1) {
-        printf("Error: %s\n", strerror(errno));
         goto error;
     }
+    
+    return;
 
+error:
+    printf("Error: %s\n", strerror(errno));
+    apr_pool_destroy(server.memory_pool);
+    apr_terminate();
+    exit(1);
+}
 
-    /* add event  */
-    smd_epoll_state *state = server.event_loop->epoll_state;
+void set_event(int fd, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler) {
+    int op;
     struct epoll_event ee = {0};
+    smd_epoll_state *state = server.event_loop->epoll_state;
 
     ee.events = 0;
-    ee.events |= EPOLLIN | EPOLLET;
+    ee.events |= EPOLLIN;
 
-    ee.data.fd = server.fd;
-    if (epoll_ctl(state->epoll_fd, EPOLL_CTL_ADD, server.fd, &ee) == -1) {
-        printf("Error: %s\n", strerror(errno));
-        exit(1);
+    if (flag == SMD_ADD_EVENT) op = EPOLL_CTL_ADD;
+    else if (flag == SMD_MOD_EVENT) op = EPOLL_CTL_MOD;
+    else if (flag == SMD_DEL_EVENT) op = EPOLL_CTL_DEL;
+
+    ee.data.fd = fd;
+    if (epoll_ctl(state->epoll_fd, op, fd, &ee) == -1) {
+        goto error;
     }
     
-    smd_event *e = &server.event_loop->events[server.fd];
+    smd_event *e = &server.event_loop->events[fd];
 
-    e->read_event_handler = accept_handler;
-    e->write_event_handler = NULL;
+    e->read_event_handler = read_handler;
+    e->write_event_handler = write_handler;
     e->client_data = NULL;
 
     return;
 error:
+    printf("Error: %s\n", strerror(errno));
+    apr_pool_destroy(server.memory_pool);
+    apr_terminate();
+    exit(1);
+}
+
+void init_server() {
+
+    init_server_config();
+
+    apr_initialize();
+
+    apr_pool_create(&server.memory_pool, NULL);
+
+    server.hash_table = apr_hash_make(server.memory_pool);
+
+    server.event_loop = smd_create_event_loop(1024);
+    if (server.event_loop == NULL) {
+        goto error;
+    }
+
+    init_server_socket();
+
+    /* add event  */
+    set_event(server.fd, SMD_ADD_EVENT, accept_handler, NULL);
+
+    return;
+error:
+    printf("Error: %s\n", strerror(errno));
     apr_pool_destroy(server.memory_pool);
     apr_terminate();
     exit(1);
@@ -364,9 +362,6 @@ void destroy_server() {
 }
 
 int main(int argc, char **argv) {
-
-    init_server_config();
-
     init_server();
 
     /* running loop  */

@@ -69,7 +69,6 @@ static int connect_to_server(smd_context *ctx) {
 
 static void show_prompt(smd_context *ctx) {
     char prompt[128];
-    char *line;
     char buf[1024];
 
     snprintf(prompt, 128, "%s:%d", ctx->tcp.host_ip, ctx->tcp.port);
