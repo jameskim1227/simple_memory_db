@@ -89,12 +89,11 @@ static void show_prompt(smd_context *ctx) {
         
         printf("input : %s", buf);
     
-        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         write(ctx->fd, buf, strlen(buf));
-        printf("%s():%d  \n", __FUNCTION__, __LINE__);
 
-        //read(ctx->fd, buf, 1024);
-        //printf("read : %s\n", buf);
+        memset(buf, 0x00, 1024);
+        read(ctx->fd, buf, 1024);
+        printf("read : %s\n", buf);
     }
 
 quit:

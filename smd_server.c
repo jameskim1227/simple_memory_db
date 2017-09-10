@@ -42,9 +42,6 @@ typedef struct smd_event_loop {
 } smd_event_loop;
 
 
-
-
-
 struct smd_server {
     int port;
     int tcp_backlog;    /* TCP listen backlog  */
@@ -58,25 +55,32 @@ struct smd_server {
 
 struct smd_server server;
 
+int process_command(int fd, char *buf);
+
+
 smd_event_loop *smd_create_event_loop(int size) {
     smd_event_loop *event_loop      = NULL;
     smd_epoll_state *epoll_state    = NULL;
     smd_event *event                = NULL;
 
     event_loop = (smd_event_loop *)apr_palloc(server.memory_pool, sizeof(smd_event_loop));
-    if (event_loop == NULL) 
+    if (event_loop == NULL) { 
+        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
+    }
 
     //event_loop->handler = NULL;
 
     /* epoll create */
     epoll_state = (smd_epoll_state *)apr_palloc(server.memory_pool, sizeof(smd_epoll_state));
     if (epoll_state == NULL) {
+        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
 
     epoll_state->epoll_fd = epoll_create(size);
     if (epoll_state->epoll_fd == -1) {
+        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
 
@@ -86,6 +90,7 @@ smd_event_loop *smd_create_event_loop(int size) {
 
     event = (smd_event *)apr_palloc(server.memory_pool, sizeof(smd_event)*1024);
     if (event == NULL) {
+        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
 
@@ -94,15 +99,6 @@ smd_event_loop *smd_create_event_loop(int size) {
     return event_loop;
 
 error:
-    if (event_loop)
-        free(event_loop);
-
-    if (epoll_state)
-        free(epoll_state);
-
-    if (event)
-        free(event);
-
     return NULL;
 }
 
@@ -137,43 +133,10 @@ void *smd_get_value(char *key) {
     return apr_hash_get(server.hash_table, key, APR_HASH_KEY_STRING);
 }
 
-
-int process_command(int fd, char *buf) {
-    int cmd;
-    void *data;
-    /* To do : need to implement strtok */
-
-    cmd = lookup_command(buf);
-    if (cmd == -1) {
-        printf("Invalid Command\n");
-        // To do : send client error message
-        return -1;
-    }
-
-    switch (cmd) {
-        case CMD_SET:
-            // XXXX : need to fix here, for now use + 4 first
-            smd_set_value("foo", "bar");
-            break;
-        case CMD_GET:
-            // XXXX : need to fix here, for now use + 4 first
-            data = smd_get_value("foo");
-            /* send data to client*/
-            printf("%s():%d data: %s \n", __FUNCTION__, __LINE__, (char*)data);
-            break;
-        case CMD_UNKNOWN:
-        default:
-            return -1;
-    }
-
-    return 0;
-}
-
 void read_query_from_client(int fd, void *data) {
     int nread;
     char buf[1024] ={0,};
 
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     nread = read(fd, buf, 1023);
     if (nread == -1) {
         printf("read error: %s\n", strerror(errno));
@@ -195,6 +158,51 @@ void send_result_to_client(int fd, void *data) {
     }
 
 }
+
+int process_command(int fd, char *buf) {
+    int cmd;
+    void *data;
+    /* To do : need to implement strtok */
+    char *command;
+    char *token, *key, *value;
+    char *ptr;
+
+    command = strtok_r(buf, " \n", &ptr);
+    printf("%s():%d, token: %s \n", __FUNCTION__, __LINE__, command);
+    key = strtok_r(NULL, " \n", &ptr);
+    printf("%s():%d, token: %s \n", __FUNCTION__, __LINE__, key);
+
+    cmd = lookup_command(command);
+    if (cmd == -1) {
+        printf("Invalid Command\n");
+        // To do : send client error message
+        return -1;
+    }
+
+    smd_event *e = &server.event_loop->events[fd];
+    switch (cmd) {
+        case CMD_SET:
+            value = strtok_r(NULL, " \n", &ptr);
+            printf("%s():%d, token: %s \n", __FUNCTION__, __LINE__, value);
+            smd_set_value(key, value);
+
+            e->write_event_handler(fd, "set success");
+            break;
+        case CMD_GET:
+            data = smd_get_value(key);
+            printf("%s():%d data: %s \n", __FUNCTION__, __LINE__, (char*)data);
+
+            e->write_event_handler(fd, data);
+
+            break;
+        case CMD_UNKNOWN:
+        default:
+            return -1;
+    }
+
+    return 0;
+}
+
 
 void accept_handler(int fd, void *data) {
     int addr_len;
@@ -240,19 +248,24 @@ static void init_server() {
     apr_initialize();
     apr_pool_create(&server.memory_pool, NULL);
 
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     server.hash_table = apr_hash_make(server.memory_pool);
 
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     server.event_loop = smd_create_event_loop(1024);
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     if (server.event_loop == NULL) {
         printf("Error: %s\n", strerror(errno));
-        exit(1);
+        goto error;
     }
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
 
     /* TCP listen  */
     if ((server.fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         printf("Error: %s\n", strerror(errno));
-        exit(1);
+        goto error;
     }
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
 
     memset((void*)&server_addr, 0x00, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
@@ -260,17 +273,17 @@ static void init_server() {
     server_addr.sin_port = htons(server.port);
 
 
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     if (bind(server.fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         printf("Error: %s\n", strerror(errno));
-        exit(1);
+        goto error;
     }
 
+    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     if (listen(server.fd, server.tcp_backlog) == -1) {
         printf("Error: %s\n", strerror(errno));
-        exit(1);
+        goto error;
     }
-
-    
 
 
     /* add event  */
@@ -291,6 +304,11 @@ static void init_server() {
     e->read_event_handler = accept_handler;
     e->client_data = NULL;
 
+    return;
+error:
+    apr_pool_destroy(server.memory_pool);
+    apr_terminate();
+    exit(1);
 }
 
 void write_handler(smd_event_loop *el) {
@@ -321,7 +339,6 @@ void run(smd_event_loop *ev) {
             smd_event *e = &ev->events[ee->data.fd];
             printf("%s():%d ee->data.fd:%d, server.fd: %d \n", __FUNCTION__, __LINE__, ee->data.fd, server.fd);
 
-            printf("read_file_proc called\n");
             e->read_event_handler(ee->data.fd, e->client_data);
 
             //e->write_event_handler(ee->data.fd, e->client_data);
@@ -330,6 +347,7 @@ void run(smd_event_loop *ev) {
 }
 
 int main(int argc, char **argv) {
+
     init_server_config();
 
     init_server();
