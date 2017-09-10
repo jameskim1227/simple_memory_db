@@ -14,11 +14,14 @@
 #include <apr_hash.h>
 #include <apr_strings.h>
 
-#define CMD_SET 0
-#define CMD_GET 1
-#define CMD_UNKNOWN 2
+/* MACRO */
+#define CMD_SET     0
+#define CMD_GET     1
+#define CMD_QUIT    2
+#define CMD_UNKNOWN 3
 
 
+/* structures */
 struct smd_event_loop;
 
 typedef void smd_event_handler(int fd, void *data);
@@ -27,6 +30,13 @@ typedef struct smd_epoll_state {
     int epoll_fd;
     struct epoll_event *epoll_events;
 } smd_epoll_state;
+
+// To do : need to implement client instead of using client_data in smd_event just as a result buffer.
+typedef struct client {
+    int fd;
+    apr_pool_t *client_mp;
+    void *buf;
+} client;
 
 typedef struct smd_event {
     int mask;
@@ -38,7 +48,6 @@ typedef struct smd_event {
 typedef struct smd_event_loop {
     smd_event *events;
     smd_epoll_state *epoll_state;
-//    smd_event_handler *handler;
 } smd_event_loop;
 
 
@@ -53,9 +62,12 @@ struct smd_server {
     apr_hash_t *hash_table;
 };
 
-struct smd_server server;
 
+/* function definition */
 int process_command(int fd, char *buf);
+
+/* gobal varialbes */
+struct smd_server server;
 
 
 smd_event_loop *smd_create_event_loop(int size) {
@@ -65,22 +77,17 @@ smd_event_loop *smd_create_event_loop(int size) {
 
     event_loop = (smd_event_loop *)apr_palloc(server.memory_pool, sizeof(smd_event_loop));
     if (event_loop == NULL) { 
-        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
-
-    //event_loop->handler = NULL;
 
     /* epoll create */
     epoll_state = (smd_epoll_state *)apr_palloc(server.memory_pool, sizeof(smd_epoll_state));
     if (epoll_state == NULL) {
-        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
 
     epoll_state->epoll_fd = epoll_create(size);
     if (epoll_state->epoll_fd == -1) {
-        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
 
@@ -90,7 +97,6 @@ smd_event_loop *smd_create_event_loop(int size) {
 
     event = (smd_event *)apr_palloc(server.memory_pool, sizeof(smd_event)*1024);
     if (event == NULL) {
-        printf("%s():%d  \n", __FUNCTION__, __LINE__);
         goto error;
     }
 
@@ -113,20 +119,21 @@ static void init_server_config() {
 }
 
 int lookup_command(char *buf) {
-    if (buf == NULL) return CMD_UNKNOWN;
+    if (buf == NULL) return -1;
 
     if (strncasecmp("set", buf, 3) == 0) {
         return CMD_SET;
     } else if (strncasecmp("get", buf, 3) == 0) {
         return CMD_GET;
-    } 
+    } else if (strncasecmp("quit", buf, 4) == 0) {
+        return CMD_QUIT;
+    }
 
     return CMD_UNKNOWN;
 }
 
 void smd_set_value(char *key, void *value) {
     apr_hash_set(server.hash_table, key, APR_HASH_KEY_STRING, apr_pstrdup(server.memory_pool, value));
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
 }
 
 void *smd_get_value(char *key) {
@@ -151,31 +158,30 @@ void read_query_from_client(int fd, void *data) {
 void send_result_to_client(int fd, void *data) {
     int nsend;
 
+    if (data == NULL) return;
+
     nsend = write(fd, data, strlen(data));
     if (nsend == -1) {
         printf("send error: %s\n", strerror(errno));
         return;
     }
-
 }
 
 int process_command(int fd, char *buf) {
     int cmd;
     void *data;
-    /* To do : need to implement strtok */
     char *command;
     char *token, *key, *value;
     char *ptr;
 
+    if (buf == NULL) return -1;
+
     command = strtok_r(buf, " \n", &ptr);
-    printf("%s():%d, token: %s \n", __FUNCTION__, __LINE__, command);
     key = strtok_r(NULL, " \n", &ptr);
-    printf("%s():%d, token: %s \n", __FUNCTION__, __LINE__, key);
 
     cmd = lookup_command(command);
     if (cmd == -1) {
         printf("Invalid Command\n");
-        // To do : send client error message
         return -1;
     }
 
@@ -183,19 +189,40 @@ int process_command(int fd, char *buf) {
     switch (cmd) {
         case CMD_SET:
             value = strtok_r(NULL, " \n", &ptr);
-            printf("%s():%d, token: %s \n", __FUNCTION__, __LINE__, value);
             smd_set_value(key, value);
 
-            e->write_event_handler(fd, "set success");
+            e->client_data = apr_psprintf(server.memory_pool, "%s", "set command OK");
+
             break;
         case CMD_GET:
             data = smd_get_value(key);
-            printf("%s():%d data: %s \n", __FUNCTION__, __LINE__, (char*)data);
+            e->client_data = apr_psprintf(server.memory_pool, "%s", data?(char*)data : "");
+            break;
+        case CMD_QUIT:
+            send_result_to_client(fd, "closing connection...");
 
-            e->write_event_handler(fd, data);
+            smd_epoll_state *state = server.event_loop->epoll_state;
+            struct epoll_event ee = {0};
+
+            ee.events = 0;
+            ee.events |= EPOLLIN | EPOLLET;
+
+            ee.data.fd = fd;
+            if (epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, fd, &ee) == -1) {
+                printf("Error: %s\n", strerror(errno));
+                exit(1);
+            }
+
+            e->read_event_handler = NULL; 
+            e->write_event_handler = NULL;
+            e->client_data = NULL;
+
+            printf("Quit Success !!!\n");
 
             break;
         case CMD_UNKNOWN:
+            e->client_data = apr_psprintf(server.memory_pool, "%s", "unknown command");
+            break;
         default:
             return -1;
     }
@@ -209,11 +236,9 @@ void accept_handler(int fd, void *data) {
     int client_fd;
     struct sockaddr_in client_addr;
 
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     addr_len = sizeof(client_addr);
 
     client_fd = accept(server.fd, (struct sockaddr*)&client_addr, &addr_len);
-    printf("%s():%d, client_fd: %d  \n", __FUNCTION__, __LINE__, client_fd);
 
     if (client_fd == -1) {
         printf("Error: %s\n", strerror(errno));
@@ -238,8 +263,6 @@ void accept_handler(int fd, void *data) {
     e->read_event_handler = read_query_from_client;
     e->write_event_handler = send_result_to_client;
     e->client_data = NULL;
-
-    printf("Accept !!!\n");
 }
 
 static void init_server() {
@@ -248,12 +271,9 @@ static void init_server() {
     apr_initialize();
     apr_pool_create(&server.memory_pool, NULL);
 
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     server.hash_table = apr_hash_make(server.memory_pool);
 
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     server.event_loop = smd_create_event_loop(1024);
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     if (server.event_loop == NULL) {
         printf("Error: %s\n", strerror(errno));
         goto error;
@@ -265,7 +285,6 @@ static void init_server() {
         printf("Error: %s\n", strerror(errno));
         goto error;
     }
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
 
     memset((void*)&server_addr, 0x00, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
@@ -273,13 +292,11 @@ static void init_server() {
     server_addr.sin_port = htons(server.port);
 
 
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     if (bind(server.fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         printf("Error: %s\n", strerror(errno));
         goto error;
     }
 
-    printf("%s():%d  \n", __FUNCTION__, __LINE__);
     if (listen(server.fd, server.tcp_backlog) == -1) {
         printf("Error: %s\n", strerror(errno));
         goto error;
@@ -302,6 +319,7 @@ static void init_server() {
     smd_event *e = &server.event_loop->events[server.fd];
 
     e->read_event_handler = accept_handler;
+    e->write_event_handler = NULL;
     e->client_data = NULL;
 
     return;
@@ -311,39 +329,38 @@ error:
     exit(1);
 }
 
-void write_handler(smd_event_loop *el) {
-    printf("write handler called !!!\n");
-}
-
-void run(smd_event_loop *ev) {
+void run() {
     int num_events, i;
     smd_epoll_state *state = NULL;
     
     while (1) {
-        //ev->handler(ev);
-
-        state = ev->epoll_state;
+        state = server.event_loop->epoll_state;
     
-        printf("%s():%d  state->epoll_fd: %d\n", __FUNCTION__, __LINE__, state->epoll_fd);
         num_events = epoll_wait(state->epoll_fd, (struct epoll_event*)state->epoll_events, 10, -1);
 
         if (num_events == -1) {
-            printf("%s():%d  \n", __FUNCTION__, __LINE__);
             printf("Error: %s\n", strerror(errno));
             exit(1);
         }
 
-        printf("%s():%d, ret:%d  \n", __FUNCTION__, __LINE__, num_events);
         for (i=0; i<num_events; i++) {
             struct epoll_event *ee = &state->epoll_events[i];
-            smd_event *e = &ev->events[ee->data.fd];
-            printf("%s():%d ee->data.fd:%d, server.fd: %d \n", __FUNCTION__, __LINE__, ee->data.fd, server.fd);
+            smd_event *e = &server.event_loop->events[ee->data.fd];
 
-            e->read_event_handler(ee->data.fd, e->client_data);
+            if (e->read_event_handler) {
+                e->read_event_handler(ee->data.fd, e->client_data);
+            }
 
-            //e->write_event_handler(ee->data.fd, e->client_data);
+            if (e->write_event_handler) {
+                e->write_event_handler(ee->data.fd, e->client_data);
+            }
         }
     }
+}
+
+void destroy_server() {
+    apr_pool_destroy(server.memory_pool);
+    apr_terminate();
 }
 
 int main(int argc, char **argv) {
@@ -352,15 +369,11 @@ int main(int argc, char **argv) {
 
     init_server();
 
-    /* add handler  */
-    //server.event_loop->handler = write_handler;
     /* running loop  */
     run(server.event_loop);
 
     /* free memory */
-    apr_pool_destroy(server.memory_pool);
-
-    apr_terminate();
+    destroy_server();
 
     return 0;
 }
