@@ -197,6 +197,41 @@ int save_data_to_file() {
 	return 0;
 }
 
+void load_data_from_file() {
+	FILE *fp;
+	char *line = NULL;
+	size_t len = 0;
+
+	fp = fopen("smd_data", "r");
+	if (!fp) return;
+
+	while (getline(&line, &len, fp) != -1) {
+		int cmd;
+		char *command, *key, *value;
+		char *ptr;
+
+		command = strtok_r(line, " ", &ptr);
+		key = strtok_r(NULL, " ", &ptr);
+
+		cmd = lookup_command(command);
+		if (cmd == -1) {
+			printf("Invalid Command\n");
+			continue;
+		}
+
+		switch (cmd) {
+			case CMD_SET:
+				value = strtok_r(NULL, " ", &ptr);
+				smd_set_value(key, value);
+				break;
+		}
+	}
+	if (line) free(line);
+
+	printf("smd_data file successfully loaded\n");
+	return;
+}
+
 int smd_save() {
 	int pid;
 
@@ -364,6 +399,7 @@ void init_server() {
     /* add event  */
     set_event(server.fd, SMD_ADD_EVENT, accept_handler, NULL);
 
+	load_data_from_file();
     return;
 error:
     printf("Error: %s\n", strerror(errno));
