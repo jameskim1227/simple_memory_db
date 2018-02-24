@@ -17,8 +17,9 @@
 /* MACRO */
 #define CMD_SET     0
 #define CMD_GET     1
-#define CMD_QUIT    2
-#define CMD_UNKNOWN 3
+#define CMD_SAVE	2
+#define CMD_QUIT    3
+#define CMD_UNKNOWN 4
 
 #define SMD_ADD_EVENT   0
 #define SMD_MOD_EVENT   1
@@ -129,6 +130,8 @@ int lookup_command(char *buf) {
         return CMD_SET;
     } else if (strncasecmp("get", buf, 3) == 0) {
         return CMD_GET;
+    } else if (strncasecmp("save", buf, 4) == 0) {
+        return CMD_SAVE;
     } else if (strncasecmp("quit", buf, 4) == 0) {
         return CMD_QUIT;
     }
@@ -137,7 +140,7 @@ int lookup_command(char *buf) {
 }
 
 void smd_set_value(char *key, void *value) {
-    apr_hash_set(server.hash_table, key, APR_HASH_KEY_STRING, apr_pstrdup(server.memory_pool, value));
+    apr_hash_set(server.hash_table, apr_pstrdup(server.memory_pool, key), APR_HASH_KEY_STRING, apr_pstrdup(server.memory_pool, value));
 }
 
 void *smd_get_value(char *key) {
@@ -171,6 +174,44 @@ void send_result_to_client(int fd, void *data) {
     }
 }
 
+int save_data_to_file() {
+	apr_hash_index_t *hi;
+	void *key, *val;
+	FILE *fp;
+
+	fp = fopen("smd_data", "w+");
+	if (!fp) return -1;
+
+	hi = apr_hash_first(server.memory_pool, server.hash_table);
+	while (hi) {
+		val = NULL;
+		apr_hash_this(hi, (const void**)&key, NULL, &val);
+
+		if (key && val)
+			fprintf(fp, "set %s %s\n", (char*)key, (char*)val);
+
+		hi = apr_hash_next(hi);
+	}
+	fclose(fp);
+
+	return 0;
+}
+
+int smd_save() {
+	int pid;
+
+	pid = fork();
+	if (pid == -1) {
+		return -1;
+	} else if (pid == 0) {
+		// child
+		save_data_to_file();	
+		exit(0);
+	}
+
+	return 0;
+}
+
 int process_command(int fd, char *buf) {
     int cmd;
     void *data;
@@ -198,6 +239,10 @@ int process_command(int fd, char *buf) {
         case CMD_GET:
             data = smd_get_value(key);
             e->client_data = apr_psprintf(server.memory_pool, "%s", data?(char*)data : "");
+            break;
+        case CMD_SAVE:
+			smd_save();
+            e->client_data = apr_psprintf(server.memory_pool, "%s", "save success");
             break;
         case CMD_QUIT:
             send_result_to_client(fd, "closing connection...");
