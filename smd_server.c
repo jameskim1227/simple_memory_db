@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <execinfo.h>
 
 #include <apr_general.h>
 #include <apr_hash.h>
@@ -265,9 +267,21 @@ int process_command(int fd, char *buf) {
     }
 
     smd_event *e = &server.event_loop->events[fd];
+
+	if (cmd == CMD_SET || cmd == CMD_GET) {
+		if (key == NULL) {
+			e->client_data = apr_psprintf(server.memory_pool, "%s", "Key is empty");
+			return -1;
+		}
+	}
+
     switch (cmd) {
         case CMD_SET:
             value = strtok_r(NULL, " \n", &ptr);
+			if (value == NULL) {
+				e->client_data = apr_psprintf(server.memory_pool, "%s", "Value is empty");
+				return -1;
+			}
             smd_set_value(key, value);
             e->client_data = apr_psprintf(server.memory_pool, "%s", "set command OK");
             break;
@@ -379,7 +393,24 @@ error:
     exit(1);
 }
 
+void handler(int sig) {
+	void *array[10];
+	size_t size;
+
+	size = backtrace(array, 10);
+
+	fprintf(stderr, "Error: signal %d\n", sig);
+	backtrace_symbols_fd(array, size, STDERR_FILENO);
+	exit(1);
+}
+
+void set_signal() {
+	signal(SIGSEGV, handler);
+}
+
 void init_server() {
+
+	set_signal();
 
     init_server_config();
 

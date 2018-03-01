@@ -89,19 +89,19 @@ static void show_prompt(smd_context *ctx) {
             memset(buf, 0x00, 1024);
             nread = read(ctx->fd, buf, 1024);
             if (nread > 0)
-                printf("read : %s\n", buf);
+                printf("%s\n", buf);
             else
                 printf("read error\n");
             goto quit;
         }
         
-        printf("input : %s", buf);
+        //printf("input : %s", buf);
     
         write(ctx->fd, buf, strlen(buf));
 
         memset(buf, 0x00, 1024);
         read(ctx->fd, buf, 1024);
-        printf("read : %s\n", buf);
+        printf("%s\n", buf);
     }
 
 quit:
