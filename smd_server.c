@@ -17,11 +17,13 @@
 #include <apr_strings.h>
 
 /* MACRO */
-#define CMD_SET     0
-#define CMD_GET     1
-#define CMD_SAVE	2
-#define CMD_QUIT    3
-#define CMD_UNKNOWN 4
+#define CMD_UNKNOWN 	0
+#define CMD_SET     	1
+#define CMD_GET     	2
+#define CMD_SAVE		3
+#define CMD_QUIT    	4
+#define CMD_SLAVE		5
+#define CMD_REGISTER	6
 
 #define SMD_ADD_EVENT   0
 #define SMD_MOD_EVENT   1
@@ -49,6 +51,8 @@ typedef struct smd_event {
 	smd_event_handler *read_event_handler;
 	smd_event_handler *write_event_handler;
 	void *client_data;
+	char *ip;
+	int port;
 } smd_event;
 
 typedef struct smd_event_loop {
@@ -61,6 +65,8 @@ struct smd_server {
 	int port;
 	int tcp_backlog;    /* TCP listen backlog  */
 	int fd;
+	char *master_host;
+	int master_port;
 
 	smd_event_loop *event_loop;
 
@@ -70,7 +76,7 @@ struct smd_server {
 
 
 /* function definition */
-void set_event(int fd, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler); 
+void set_event(int fd, struct sockaddr_in *client_info, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler); 
 int process_command(int fd, char *buf);
 
 /* gobal varialbes */
@@ -115,8 +121,8 @@ error:
 	return NULL;
 }
 
-void init_server_config() {
-	server.port         = 12345;
+void init_server_config(char *port) {
+	server.port         = atoi(port);
 	server.tcp_backlog  = 512;
 
 	server.event_loop   = NULL;
@@ -134,6 +140,10 @@ int lookup_command(char *buf) {
 		return CMD_GET;
 	} else if (strncasecmp("save", buf, 4) == 0) {
 		return CMD_SAVE;
+	} else if (strncasecmp("slave", buf, 5) == 0) {
+		return CMD_SLAVE;
+	} else if (strncasecmp("register", buf, 8) == 0) {
+		return CMD_REGISTER;
 	} else if (strncasecmp("quit", buf, 4) == 0) {
 		return CMD_QUIT;
 	}
@@ -249,8 +259,63 @@ int smd_save() {
 	return 0;
 }
 
+int request_to_master() {
+	struct sockaddr_in master_addr;
+	int master_sock;
+	int ret;
+	char buf[8];
+
+	if ((master_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		return -1;
+	}
+
+	memset((void*)&master_addr, 0x00, sizeof(master_addr));
+	master_addr.sin_family = AF_INET;
+	master_addr.sin_addr.s_addr = inet_addr(server.master_host);
+	master_addr.sin_port = htons(server.master_port);
+
+	if (connect(master_sock, (struct sockaddr*)&master_addr, sizeof(master_addr)) == -1) {
+		printf("connect error\n");
+		goto error;
+	}
+
+	if ((ret = write(master_sock, "REGISTER", strlen("REGISTER"))) <= 0) {
+		printf("write error\n");
+		goto error;
+	}
+
+	if ((ret = read(master_sock, buf, 8)) <= 0) {
+		printf("read error\n");
+		goto error;
+	}
+
+	printf("buf: %s\n", buf);
+	if (strncmp(&buf[0], "1", 1)) {
+		printf("result error\n");
+		goto error;
+	}
+
+	close(master_sock);
+	return 0;
+error:
+	close(master_sock);
+	printf("Err: %s\n", strerror(errno));
+	return -1;
+}
+
+int smd_set_slave(char *ip, char *port) {
+	int ret;
+
+	server.master_host = apr_pstrdup(server.memory_pool, ip);
+	server.master_port = atoi(port);
+	
+	ret = request_to_master();
+
+	return ret;
+}
+
 int process_command(int fd, char *buf) {
-	int cmd;
+	int cmd, ret;
 	void *data;
 	char *command, *key, *value;
 	char *ptr;
@@ -268,7 +333,7 @@ int process_command(int fd, char *buf) {
 
 	smd_event *e = &server.event_loop->events[fd];
 
-	if (cmd == CMD_SET || cmd == CMD_GET) {
+	if (cmd == CMD_SET || cmd == CMD_GET || cmd == CMD_SLAVE) {
 		if (key == NULL) {
 			e->client_data = apr_psprintf(server.memory_pool, "%s", "Key is empty");
 			return -1;
@@ -293,9 +358,27 @@ int process_command(int fd, char *buf) {
 			smd_save();
 			e->client_data = apr_psprintf(server.memory_pool, "%s", "save success");
 			break;
+		case CMD_SLAVE:
+			value = strtok_r(NULL, " \n", &ptr);
+			if (value == NULL) {
+				e->client_data = apr_psprintf(server.memory_pool, "%s", "Value is empty");
+				return -1;
+			}
+			ret = smd_set_slave(key, value);
+			if (ret == 0) {
+				e->client_data = apr_psprintf(server.memory_pool, "%s", "OK");
+			} else {
+				e->client_data = apr_psprintf(server.memory_pool, "%s", "Failed");
+			}
+			break;
+		case CMD_REGISTER:
+			printf("slave ip:%s, port: %d\n", e->ip, e->port);
+			send_result_to_client(fd, "1");
+			set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+			break;
 		case CMD_QUIT:
 			send_result_to_client(fd, "closing connection...");
-			set_event(fd, SMD_DEL_EVENT, NULL, NULL);
+			set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
 			break;
 		case CMD_UNKNOWN:
 			e->client_data = apr_psprintf(server.memory_pool, "%s", "unknown command");
@@ -321,7 +404,7 @@ void accept_handler(int fd, void *data) {
 	}
 
 	/* add event  */
-	set_event(client_fd, SMD_ADD_EVENT, read_query_from_client, send_result_to_client);
+	set_event(client_fd, &client_addr, SMD_ADD_EVENT, read_query_from_client, send_result_to_client);
 
 	return;
 error:
@@ -362,7 +445,7 @@ error:
 	exit(1);
 }
 
-void set_event(int fd, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler) {
+void set_event(int fd, struct sockaddr_in *client_info, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler) {
 	int op;
 	struct epoll_event ee = {0};
 	smd_epoll_state *state = server.event_loop->epoll_state;
@@ -384,6 +467,11 @@ void set_event(int fd, int flag, smd_event_handler *read_handler, smd_event_hand
 	e->read_event_handler = read_handler;
 	e->write_event_handler = write_handler;
 	e->client_data = NULL;
+
+	if (client_info == NULL) return;
+
+	e->ip = apr_pstrdup(server.memory_pool, inet_ntoa(client_info->sin_addr));
+	e->port = ntohs(client_info->sin_port);
 
 	return;
 error:
@@ -408,11 +496,11 @@ void set_signal() {
 	signal(SIGSEGV, handler);
 }
 
-void init_server() {
+void init_server(char *port) {
 
 	set_signal();
 
-	init_server_config();
+	init_server_config(port);
 
 	apr_initialize();
 
@@ -428,7 +516,7 @@ void init_server() {
 	init_server_socket();
 
 	/* add event  */
-	set_event(server.fd, SMD_ADD_EVENT, accept_handler, NULL);
+	set_event(server.fd, NULL, SMD_ADD_EVENT, accept_handler, NULL);
 
 	load_data_from_file();
 	return;
@@ -474,7 +562,8 @@ void destroy_server() {
 }
 
 int main(int argc, char **argv) {
-	init_server();
+
+	init_server(argv[1]);
 
 	/* running loop  */
 	run(server.event_loop);
