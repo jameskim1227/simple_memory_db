@@ -60,6 +60,13 @@ typedef struct smd_event_loop {
 	smd_epoll_state *epoll_state;
 } smd_event_loop;
 
+typedef struct smd_slave {
+	int fd;
+	char ip[16];
+	int port;
+	apr_pool_t *slave_mp;
+	void *data;
+} smd_slave;
 
 struct smd_server {
 	int port;
@@ -67,6 +74,9 @@ struct smd_server {
 	int fd;
 	char *master_host;
 	int master_port;
+
+	smd_slave slaves[1024];
+	int slave_idx;
 
 	smd_event_loop *event_loop;
 
@@ -129,6 +139,8 @@ void init_server_config(char *port) {
 
 	server.memory_pool  = NULL;
 	server.hash_table   = NULL;
+
+	server.slave_idx = 0;
 }
 
 int lookup_command(char *buf) {
@@ -168,6 +180,8 @@ void read_query_from_client(int fd, void *data) {
 		printf("read error: %s\n", strerror(errno));
 		return;
 	} else if (nread == 0) { // connection closed
+		//set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+		close(fd);
 		return;
 	}
 
@@ -279,7 +293,8 @@ int request_to_master() {
 		goto error;
 	}
 
-	if ((ret = write(master_sock, "REGISTER", strlen("REGISTER"))) <= 0) {
+	sprintf(buf, "REGISTER %d", server.port);
+	if ((ret = write(master_sock, buf, strlen(buf))) <= 0) {
 		printf("write error\n");
 		goto error;
 	}
@@ -314,12 +329,30 @@ int smd_set_slave(char *ip, char *port) {
 	return ret;
 }
 
+int smd_register_slave(char *ip, char *port) {
+	
+	strncpy(server.slaves[server.slave_idx].ip, ip, 16);
+	server.slaves[server.slave_idx].ip[15] = '\0';
+
+	server.slaves[server.slave_idx].port = atoi(port);
+	
+	printf("[%s]:%s():%d slave info[%d] ip:%s, port:%d\n", __FILE__, __FUNCTION__, __LINE__, 
+			server.slave_idx,
+			server.slaves[server.slave_idx].ip,
+			server.slaves[server.slave_idx].port);
+
+	server.slave_idx++;
+
+	return 0;
+}
+
 int process_command(int fd, char *buf) {
 	int cmd, ret;
 	void *data;
 	char *command, *key, *value;
 	char *ptr;
 
+	//printf("[%s]:%s():%d  buf:%s\n", __FILE__, __FUNCTION__, __LINE__, buf);
 	if (buf == NULL) return -1;
 
 	command = strtok_r(buf, " \n", &ptr);
@@ -342,6 +375,7 @@ int process_command(int fd, char *buf) {
 
 	switch (cmd) {
 		case CMD_SET:
+			//printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
 			value = strtok_r(NULL, " \n", &ptr);
 			if (value == NULL) {
 				e->client_data = apr_psprintf(server.memory_pool, "%s", "Value is empty");
@@ -372,13 +406,18 @@ int process_command(int fd, char *buf) {
 			}
 			break;
 		case CMD_REGISTER:
-			printf("slave ip:%s, port: %d\n", e->ip, e->port);
+			printf("MASTER REGISTER, ip: %s, port: %s\n", e->ip, key);
 			send_result_to_client(fd, "1");
-			set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+			close(fd);
+			
+			smd_register_slave(e->ip, key);
+
 			break;
 		case CMD_QUIT:
 			send_result_to_client(fd, "closing connection...");
 			set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+			sleep(1);
+			close(fd);
 			break;
 		case CMD_UNKNOWN:
 			e->client_data = apr_psprintf(server.memory_pool, "%s", "unknown command");
@@ -451,7 +490,7 @@ void set_event(int fd, struct sockaddr_in *client_info, int flag, smd_event_hand
 	smd_epoll_state *state = server.event_loop->epoll_state;
 
 	ee.events = 0;
-	ee.events |= EPOLLIN;
+	ee.events |= EPOLLIN | EPOLLOUT;
 
 	if (flag == SMD_ADD_EVENT) op = EPOLL_CTL_ADD;
 	else if (flag == SMD_MOD_EVENT) op = EPOLL_CTL_MOD;
@@ -494,6 +533,7 @@ void handler(int sig) {
 
 void set_signal() {
 	signal(SIGSEGV, handler);
+	signal(SIGINT, handler);
 }
 
 void init_server(char *port) {
@@ -546,10 +586,12 @@ void run() {
 			smd_event *e = &server.event_loop->events[ee->data.fd];
 
 			if (e->read_event_handler) {
+	//			printf("[%s]:%s():%d  %d, %s\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, num_events);
 				e->read_event_handler(ee->data.fd, e->client_data);
 			}
 
 			if (e->write_event_handler) {
+	//			printf("[%s]:%s():%d  %d, %d\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, num_events);
 				e->write_event_handler(ee->data.fd, e->client_data);
 			}
 		}
