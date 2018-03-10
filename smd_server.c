@@ -185,9 +185,11 @@ void read_query_from_client(int fd, void *data) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK) return;
 
 		printf("read error: %s\n", strerror(errno));
+		set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+		close(fd);
 		return;
 	} else if (nread == 0) { // connection closed
-		//set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+		set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
 		close(fd);
 		return;
 	}
@@ -204,6 +206,8 @@ void send_result_to_client(int fd, void *data) {
 	if (nsend == -1) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK) return;
 		printf("send error: %s\n", strerror(errno));
+		set_event(fd, NULL, SMD_DEL_EVENT, NULL, NULL);
+		close(fd);
 		return;
 	}
 }
@@ -417,6 +421,10 @@ int smd_full_sync(char *ip, char *port) {
 		char buf[1024];
 
 		for (i=0; i<server.slave_idx; i++) {
+			printf("[%s]:%s():%d slave info[%d] ip:%s, port:%d\n", __FILE__, __FUNCTION__, __LINE__, 
+					i,
+					server.slaves[i].ip,
+					server.slaves[i].port);
 			if (strcmp(server.slaves[i].ip, ip) == 0 &&
 					server.slaves[i].port == atoi(port)) {
 				found = 1;
@@ -425,7 +433,7 @@ int smd_full_sync(char *ip, char *port) {
 			}
 		}
 
-		if (found != 0 || fd < 0) {
+		if (found == 0 || fd < 0) {
 			printf("Can't find one of slaves\n");
 			exit(0);
 		}
@@ -505,9 +513,11 @@ int process_command(int fd, char *buf) {
 			}
 			ret = smd_set_slave(key, value);
 			if (ret == 0) {
-				e->client_data = apr_psprintf(server.memory_pool, "%s", "OK");
+				send_result_to_client(fd, "OK");
+				//e->client_data = apr_psprintf(server.memory_pool, "%s", "OK");
 			} else {
-				e->client_data = apr_psprintf(server.memory_pool, "%s", "Failed");
+				send_result_to_client(fd, "Failed");
+				//e->client_data = apr_psprintf(server.memory_pool, "%s", "Failed");
 			}
 			break;
 		case CMD_REGISTER:
@@ -517,13 +527,10 @@ int process_command(int fd, char *buf) {
 			
 			smd_register_slave(e->ip, key);
 
-			printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
 			smd_full_sync(e->ip, key);
 
-			printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
 			break;
 		case CMD_PING:
-			printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
 			e->client_data = apr_psprintf(server.memory_pool, "%s", "PONG");
 			break;
 		case CMD_QUIT:
@@ -605,7 +612,7 @@ void set_event(int fd, struct sockaddr_in *client_info, int flag, smd_event_hand
 	smd_epoll_state *state = server.event_loop->epoll_state;
 
 	ee.events = 0;
-	ee.events |= EPOLLIN | EPOLLOUT;
+	ee.events |= EPOLLIN;
 
 	if (flag == SMD_ADD_EVENT) op = EPOLL_CTL_ADD;
 	else if (flag == SMD_MOD_EVENT) op = EPOLL_CTL_MOD;
@@ -694,7 +701,6 @@ void run() {
 
 		num_events = epoll_wait(state->epoll_fd, (struct epoll_event*)state->epoll_events, 10, -1);
 
-		printf("[%s]:%s():%d  ### num_events: %d\n", __FILE__, __FUNCTION__, __LINE__, num_events);
 		if (num_events == -1) {
 			printf("Error: %s\n", strerror(errno));
 			exit(1);
@@ -705,12 +711,10 @@ void run() {
 			smd_event *e = &server.event_loop->events[ee->data.fd];
 
 			if (e->read_event_handler) {
-				printf("[%s]:%s():%d  %d, %s\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, e->client_data);
 				e->read_event_handler(ee->data.fd, e->client_data);
 			}
 
 			if (e->write_event_handler) {
-				printf("[%s]:%s():%d  %d, %s\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, e->client_data);
 				e->write_event_handler(ee->data.fd, e->client_data);
 			}
 		}
