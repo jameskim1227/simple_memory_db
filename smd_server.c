@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <execinfo.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include <apr_general.h>
 #include <apr_hash.h>
@@ -24,6 +26,7 @@
 #define CMD_QUIT    	4
 #define CMD_SLAVE		5
 #define CMD_REGISTER	6
+#define CMD_PING		7
 
 #define SMD_ADD_EVENT   0
 #define SMD_MOD_EVENT   1
@@ -156,6 +159,8 @@ int lookup_command(char *buf) {
 		return CMD_SLAVE;
 	} else if (strncasecmp("register", buf, 8) == 0) {
 		return CMD_REGISTER;
+	} else if (strncasecmp("ping", buf, 4) == 0) {
+		return CMD_PING;
 	} else if (strncasecmp("quit", buf, 4) == 0) {
 		return CMD_QUIT;
 	}
@@ -177,6 +182,8 @@ void read_query_from_client(int fd, void *data) {
 
 	nread = read(fd, buf, 1023);
 	if (nread == -1) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+
 		printf("read error: %s\n", strerror(errno));
 		return;
 	} else if (nread == 0) { // connection closed
@@ -195,6 +202,7 @@ void send_result_to_client(int fd, void *data) {
 
 	nsend = write(fd, data, strlen(data));
 	if (nsend == -1) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) return;
 		printf("send error: %s\n", strerror(errno));
 		return;
 	}
@@ -329,6 +337,52 @@ int smd_set_slave(char *ip, char *port) {
 	return ret;
 }
 
+int smd_connect_to_slave(int idx) {
+	struct sockaddr_in addr;
+	int sock;
+	int ret;
+	char buf[8];
+
+	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		return -1;
+	}
+
+	printf("[%s]:%s():%d  %s, %d\n", __FILE__, __FUNCTION__, __LINE__, server.slaves[idx].ip, server.slaves[idx].port);
+	memset((void*)&addr, 0x00, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = inet_addr(server.slaves[idx].ip);
+	addr.sin_port = htons(server.slaves[idx].port);
+
+	if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+		printf("connect error\n");
+		goto error;
+	}
+
+	printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
+	if ((ret = write(sock, "PING", strlen("PONG"))) <= 0) {
+		printf("write error\n");
+		goto error;
+	}
+
+	printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
+	if ((ret = read(sock, buf, 8)) <= 0) {
+		printf("read error\n");
+		goto error;
+	}
+
+	printf("[%s]:%s():%d  %s\n", __FILE__, __FUNCTION__, __LINE__, buf);
+	if (strncmp(buf, "PONG", 4)) {
+		printf("result error\n");
+		goto error;
+	}
+
+	return sock;
+error:
+	close(sock);
+	printf("Err: %s\n", strerror(errno));
+	return -1;
+}
+
 int smd_register_slave(char *ip, char *port) {
 	
 	strncpy(server.slaves[server.slave_idx].ip, ip, 16);
@@ -341,7 +395,58 @@ int smd_register_slave(char *ip, char *port) {
 			server.slaves[server.slave_idx].ip,
 			server.slaves[server.slave_idx].port);
 
+	server.slaves[server.slave_idx].fd = smd_connect_to_slave(server.slave_idx);
+
 	server.slave_idx++;
+
+	return 0;
+}
+
+int smd_full_sync(char *ip, char *port) {
+	int pid;
+
+	pid = fork();
+	if (pid == -1) {
+		return -1;
+	} else if (pid == 0) {
+		// child
+		int i, fd = -1;
+		apr_hash_index_t *hi;
+		void *key, *val;
+		char found = 0;
+		char buf[1024];
+
+		for (i=0; i<server.slave_idx; i++) {
+			if (strcmp(server.slaves[i].ip, ip) == 0 &&
+					server.slaves[i].port == atoi(port)) {
+				found = 1;
+				fd = server.slaves[i].fd;
+				break;
+			}
+		}
+
+		if (found != 0 || fd < 0) {
+			printf("Can't find one of slaves\n");
+			exit(0);
+		}
+
+
+		hi = apr_hash_first(server.memory_pool, server.hash_table);
+		while (hi) {
+			val = NULL;
+			apr_hash_this(hi, (const void**)&key, NULL, &val);
+
+			if (key && val) {
+				snprintf(buf, 1023, "set %s %s\n", (char*)key, (char*)val);
+				buf[1023] = '\0';
+				send_result_to_client(fd, buf);
+			}
+
+			hi = apr_hash_next(hi);
+		}
+		printf("Full Sync completed\n");
+		exit(0);
+	}
 
 	return 0;
 }
@@ -352,7 +457,7 @@ int process_command(int fd, char *buf) {
 	char *command, *key, *value;
 	char *ptr;
 
-	//printf("[%s]:%s():%d  buf:%s\n", __FILE__, __FUNCTION__, __LINE__, buf);
+	printf("[%s]:%s():%d  buf:%s\n", __FILE__, __FUNCTION__, __LINE__, buf);
 	if (buf == NULL) return -1;
 
 	command = strtok_r(buf, " \n", &ptr);
@@ -412,6 +517,14 @@ int process_command(int fd, char *buf) {
 			
 			smd_register_slave(e->ip, key);
 
+			printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
+			smd_full_sync(e->ip, key);
+
+			printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
+			break;
+		case CMD_PING:
+			printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
+			e->client_data = apr_psprintf(server.memory_pool, "%s", "PONG");
 			break;
 		case CMD_QUIT:
 			send_result_to_client(fd, "closing connection...");
@@ -466,6 +579,8 @@ void init_server_socket() {
 	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	server_addr.sin_port = htons(server.port);
 
+	int option = 1;
+	setsockopt(server.fd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
 
 	if (bind(server.fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
 		goto error;
@@ -500,6 +615,9 @@ void set_event(int fd, struct sockaddr_in *client_info, int flag, smd_event_hand
 	if (epoll_ctl(state->epoll_fd, op, fd, &ee) == -1) {
 		goto error;
 	}
+
+	int flags = fcntl(fd,F_GETFL,0);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
 	smd_event *e = &server.event_loop->events[fd];
 
@@ -576,6 +694,7 @@ void run() {
 
 		num_events = epoll_wait(state->epoll_fd, (struct epoll_event*)state->epoll_events, 10, -1);
 
+		printf("[%s]:%s():%d  ### num_events: %d\n", __FILE__, __FUNCTION__, __LINE__, num_events);
 		if (num_events == -1) {
 			printf("Error: %s\n", strerror(errno));
 			exit(1);
@@ -586,12 +705,12 @@ void run() {
 			smd_event *e = &server.event_loop->events[ee->data.fd];
 
 			if (e->read_event_handler) {
-	//			printf("[%s]:%s():%d  %d, %s\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, num_events);
+				printf("[%s]:%s():%d  %d, %s\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, e->client_data);
 				e->read_event_handler(ee->data.fd, e->client_data);
 			}
 
 			if (e->write_event_handler) {
-	//			printf("[%s]:%s():%d  %d, %d\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, num_events);
+				printf("[%s]:%s():%d  %d, %s\n", __FILE__, __FUNCTION__, __LINE__, ee->data.fd, e->client_data);
 				e->write_event_handler(ee->data.fd, e->client_data);
 			}
 		}
