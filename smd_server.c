@@ -91,6 +91,7 @@ struct smd_server {
 /* function definition */
 void set_event(int fd, struct sockaddr_in *client_info, int flag, smd_event_handler *read_handler, smd_event_handler *write_handler); 
 int process_command(int fd, char *buf);
+void send_result_to_client(int fd, void *dataa);
 
 /* gobal varialbes */
 struct smd_server server;
@@ -168,8 +169,22 @@ int lookup_command(char *buf) {
 	return CMD_UNKNOWN;
 }
 
+void smd_send_data_to_slaves(char *key, char *value) {
+	int i;
+	char buf[1024];
+
+	for (i=0; i<server.slave_idx; i++) {
+		snprintf(buf, 1023, "set %s %s\n", key, value);
+		buf[1023] = '\0';
+		send_result_to_client(server.slaves[i].fd, buf);
+	}
+}
+
+
 void smd_set_value(char *key, void *value) {
 	apr_hash_set(server.hash_table, apr_pstrdup(server.memory_pool, key), APR_HASH_KEY_STRING, apr_pstrdup(server.memory_pool, value));
+
+	smd_send_data_to_slaves(key, value);
 }
 
 void *smd_get_value(char *key) {
@@ -481,21 +496,20 @@ int process_command(int fd, char *buf) {
 
 	if (cmd == CMD_SET || cmd == CMD_GET || cmd == CMD_SLAVE) {
 		if (key == NULL) {
-			e->client_data = apr_psprintf(server.memory_pool, "%s", "Key is empty");
+			send_result_to_client(fd, "Key is empty");
 			return -1;
 		}
 	}
 
 	switch (cmd) {
 		case CMD_SET:
-			//printf("[%s]:%s():%d  \n", __FILE__, __FUNCTION__, __LINE__);
 			value = strtok_r(NULL, " \n", &ptr);
 			if (value == NULL) {
-				e->client_data = apr_psprintf(server.memory_pool, "%s", "Value is empty");
+				send_result_to_client(fd, "Value is empty");
 				return -1;
 			}
 			smd_set_value(key, value);
-			e->client_data = apr_psprintf(server.memory_pool, "%s", "set command OK");
+			send_result_to_client(fd, "OK");
 			break;
 		case CMD_GET:
 			data = smd_get_value(key);
@@ -503,21 +517,19 @@ int process_command(int fd, char *buf) {
 			break;
 		case CMD_SAVE:
 			smd_save();
-			e->client_data = apr_psprintf(server.memory_pool, "%s", "save success");
+			send_result_to_client(fd, "SAVE SUCCESS");
 			break;
 		case CMD_SLAVE:
 			value = strtok_r(NULL, " \n", &ptr);
 			if (value == NULL) {
-				e->client_data = apr_psprintf(server.memory_pool, "%s", "Value is empty");
+				send_result_to_client(fd, "Value is empty");
 				return -1;
 			}
 			ret = smd_set_slave(key, value);
 			if (ret == 0) {
 				send_result_to_client(fd, "OK");
-				//e->client_data = apr_psprintf(server.memory_pool, "%s", "OK");
 			} else {
 				send_result_to_client(fd, "Failed");
-				//e->client_data = apr_psprintf(server.memory_pool, "%s", "Failed");
 			}
 			break;
 		case CMD_REGISTER:
