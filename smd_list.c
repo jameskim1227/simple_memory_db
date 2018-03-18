@@ -61,9 +61,24 @@ void smd_add_node(smd_list *list, void *data) {
 	list->length++;
 }
 
-//void smd_delete_node(smd_list *list, void *data) {
+void smd_delete_first_node(smd_list *list) {
+	smd_node *cur_node = list->head;
 
-//}
+	if (cur_node == NULL) {
+		return;
+	}
+
+	smd_node *next_node = cur_node->next;
+	free(cur_node);
+
+	if (next_node == NULL) {
+		list->head = NULL;
+		list->tail = NULL;
+		return;
+	}
+
+	list->head = next_node;
+}
 
 void smd_print_all_nodes(smd_list *list) {
 	smd_node *cur_node = list->head;
@@ -72,6 +87,7 @@ void smd_print_all_nodes(smd_list *list) {
 		printf("data: %s\n", cur_node->data);
 		cur_node = cur_node->next;
 	}
+	printf("\n");
 }
 
 int main() {
@@ -83,11 +99,24 @@ int main() {
 	smd_add_node(list, "1");
 	smd_add_node(list, "2");
 	smd_add_node(list, "3");
-
 	smd_print_all_nodes(list);
 
-	//smd_delete_node(list, data);
-	//smd_release_all_nodes(list);
+	smd_delete_first_node(list);
+	smd_print_all_nodes(list);
+
+	smd_delete_first_node(list);
+	smd_print_all_nodes(list);
+
+	smd_add_node(list, "1");
+	smd_print_all_nodes(list);
+
+	smd_delete_first_node(list);
+	smd_delete_first_node(list);
+	smd_print_all_nodes(list);
+	
+	smd_add_node(list, "5");
+	smd_print_all_nodes(list);
+
 
 	return 0;
 }
